@@ -1,5 +1,5 @@
 
-name: Gradle JDK21 Offline Bundle
+name: Gradle JDK21 Offline Release (No ZIP)
 
 on:
   workflow_dispatch:
@@ -10,108 +10,46 @@ permissions:
 jobs:
   prepare-bundle:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
-      - name: Prepare directories
-        run: |
-          mkdir -p output/images
-          mkdir -p output/files
-
-      - name: Pull Gradle 9.8.0 JDK 21 image
-        run: |
-          docker pull --platform linux/amd64 \
-            gradle:9.8.0-jdk21-noble
-
-          docker image inspect \
-            gradle:9.8.0-jdk21-noble \
-            --format '{{.Id}} {{.Architecture}}'
-
-      - name: Verify Gradle and Java
-        run: |
-          docker run --rm \
-            --platform linux/amd64 \
-            gradle:9.8.0-jdk21-noble \
-            gradle --version
-
-      - name: Export image in smaller parts
+      - name: Prepare image and export TAR parts
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p output
+          IMAGE='gradle:9.8.0-jdk21-noble'
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker run --rm --platform linux/amd64 "$IMAGE" gradle --version
+          docker save "$IMAGE" | split -b 300M -d -a 3 - output/gradle-jdk21.tar.part-
 
-          docker save \
-            gradle:9.8.0-jdk21-noble \
-            | gzip -1 \
-            | split -b 400M -d -a 3 - \
-                output/images/gradle-jdk21.tar.gz.part-
-
-          ls -lh output/images/
-
-      - name: Download Gradle Wrapper distribution
+      - name: Create manifest and checksums
         shell: bash
         run: |
           set -euo pipefail
-
-          cd output/files
-
-          curl -fL --retry 3 \
-            https://services.gradle.org/distributions/gradle-9.8.0-bin.zip \
-            -o gradle-9.8.0-bin.zip
-
-          curl -fL --retry 3 \
-            https://services.gradle.org/distributions/gradle-9.8.0-bin.zip.sha256 \
-            -o gradle-9.8.0-bin.zip.sha256
-
-          EXPECTED="$(tr -d '[:space:]' \
-            < gradle-9.8.0-bin.zip.sha256)"
-
-          echo "${EXPECTED}  gradle-9.8.0-bin.zip" \
-            | sha256sum -c -
-
-      - name: Generate manifest and checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > output/versions.env <<'EOF'
-          GRADLE_VERSION=9.8.0
-          JAVA_VERSION=21
-          ARCH=linux/amd64
+          cat > output/versions.env <<'VERSIONS'
           SOURCE_IMAGE=gradle:9.8.0-jdk21-noble
           TARGET_IMAGE=repo-sec.nexus.local:31920/devsecops/gradle:9.8.0-jdk21
-          EOF
+          ARCH=linux/amd64
+          GRADLE_VERSION=9.8.0
+          JAVA_VERSION=21
+          VERSIONS
+          (cd output && sha256sum gradle-jdk21.tar.part-* versions.env > SHA256SUMS)
+          ls -lh output
 
-          (
-            cd output
-            find images files -type f -print0 \
-              | sort -z \
-              | xargs -0 sha256sum
-          ) > output/SHA256SUMS
-
-      - name: Upload image bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-jdk21-image
-          path: output/images/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-
-      - name: Upload Gradle distribution
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-9.8.0-distribution
-          path: output/files/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-
-      - name: Upload bundle manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-bundle-manifest
-          path: |
-            output/versions.env
-            output/SHA256SUMS
-          if-no-files-found: error
-          retention-days: 7
+      - name: Publish individual files as release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: offline-gradle-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --title "Gradle JDK21 offline bundle $RELEASE_TAG" \
+            --notes 'Separate TAR parts; no ZIP artifact. Verify SHA256SUMS before loading.' \
+            --latest=false
+          gh release upload "$RELEASE_TAG" output/*
+          gh release view "$RELEASE_TAG" --json url --jq '.url'
