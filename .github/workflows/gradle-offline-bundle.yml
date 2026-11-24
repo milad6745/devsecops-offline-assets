@@ -1,5 +1,4 @@
-
-name: Gradle JDK21 Offline Release (No ZIP)
+name: Gradle JDK21 Offline Release (N11o ZIP)
 
 on:
   workflow_dispatch:
